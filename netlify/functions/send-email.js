@@ -313,6 +313,7 @@ exports.handler = async function (event) {
   };
 
   try {
+    console.log("Sending via Resend:", JSON.stringify({ from: message.from, to: message.to, subject: message.subject }));
     const resp = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
@@ -322,11 +323,13 @@ exports.handler = async function (event) {
       body: JSON.stringify(message),
     });
     const result = await resp.json();
+    console.log("Resend response:", resp.status, JSON.stringify(result));
     if (!resp.ok) {
       return { statusCode: resp.status, body: JSON.stringify({ error: result.message || "Resend error", details: result }) };
     }
     return { statusCode: 200, body: JSON.stringify({ ok: true, messageId: result.id }) };
   } catch (e) {
+    console.error("Send failed:", e.message);
     return { statusCode: 500, body: JSON.stringify({ error: e.message }) };
   }
 };
