@@ -3,9 +3,9 @@
 // Single endpoint for all BRL + SB transactional email.
 // Template style: dark branded header/footer, white body card, light gray info boxes.
 //
-// Requires env var POSTMARK_API_TOKEN set in Netlify: Site settings > Environment variables.
+// Requires env var RESEND_API_KEY set in Netlify: Project configuration > Environment variables.
 
-const POSTMARK_API_TOKEN = process.env.POSTMARK_API_TOKEN;
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const ALERT_EMAIL = "boldresearchlabs.orders@gmail.com";
 
 const BRANDS = {
@@ -274,8 +274,8 @@ exports.handler = async function (event) {
   if (event.httpMethod !== "POST") {
     return { statusCode: 405, body: "Method Not Allowed" };
   }
-  if (!POSTMARK_API_TOKEN) {
-    return { statusCode: 500, body: JSON.stringify({ error: "POSTMARK_API_TOKEN not configured" }) };
+  if (!RESEND_API_KEY) {
+    return { statusCode: 500, body: JSON.stringify({ error: "RESEND_API_KEY not configured" }) };
   }
 
   let payload;
@@ -304,30 +304,28 @@ exports.handler = async function (event) {
   const replyTo = isAlert ? (d.customer_email || undefined) : ALERT_EMAIL;
 
   const message = {
-    From: `${brand.name} <${brand.fromAddress}>`,
-    To: to,
-    ReplyTo: replyTo,
-    Subject: subject,
-    HtmlBody: html,
-    MessageStream: "outbound",
-    Tag: `${brandKey || "BRL"}-${type}`,
+    from: `${brand.name} <${brand.fromAddress}>`,
+    to: [to],
+    reply_to: replyTo,
+    subject: subject,
+    html: html,
+    tags: [{ name: "category", value: `${brandKey || "BRL"}-${type}` }],
   };
 
   try {
-    const resp = await fetch("https://api.postmarkapp.com/email", {
+    const resp = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
-        "Accept": "application/json",
+        "Authorization": `Bearer ${RESEND_API_KEY}`,
         "Content-Type": "application/json",
-        "X-Postmark-Server-Token": POSTMARK_API_TOKEN,
       },
       body: JSON.stringify(message),
     });
     const result = await resp.json();
     if (!resp.ok) {
-      return { statusCode: resp.status, body: JSON.stringify({ error: result.Message || "Postmark error", details: result }) };
+      return { statusCode: resp.status, body: JSON.stringify({ error: result.message || "Resend error", details: result }) };
     }
-    return { statusCode: 200, body: JSON.stringify({ ok: true, messageId: result.MessageID }) };
+    return { statusCode: 200, body: JSON.stringify({ ok: true, messageId: result.id }) };
   } catch (e) {
     return { statusCode: 500, body: JSON.stringify({ error: e.message }) };
   }
