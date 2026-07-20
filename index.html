@@ -478,7 +478,7 @@ body {
 
         <!-- Search bar -->
         <div style="padding:0 0 10px 0;">
-          <input id="prod-search" type="text" placeholder="🔍  Search by name or SKU..." oninput="renderProducts()"
+          <input id="prod-search" type="text" placeholder="🔍  Search by name or SKU..." oninput="scheduleRender()"
             style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px 14px;color:var(--text1);font-family:var(--font-body);font-size:13px;outline:none;box-sizing:border-box;transition:border-color .2s;"
             onfocus="this.style.borderColor='var(--teal-light)'" onblur="this.style.borderColor='var(--border)'">
         </div>
@@ -691,9 +691,29 @@ async function sbFetch(path, opts = {}) {
 
 // ── INIT ──
 (async function init() {
-  await loadSettings();
-  await loadProducts();
+  wireProductList();                                  // one delegated click handler (perf)
+  await Promise.all([loadSettings(), loadProducts()]); // independent loads run in parallel
 })();
+
+// Event delegation: a single listener on the grid instead of one per card.
+function wireProductList() {
+  const list = document.getElementById("product-list");
+  if (!list || list._pcWired) return;
+  list._pcWired = true;
+  list.addEventListener("click", (e) => {
+    if (e.target.closest(".pcard-qty")) return;       // qty +/- handle themselves
+    const card = e.target.closest(".pcard");
+    if (!card || card.classList.contains("pcard--oos")) return;
+    toggleProduct(parseInt(card.dataset.id));
+  });
+}
+
+// Debounced search so we don't re-render on every keystroke.
+let _searchTimer;
+function scheduleRender() {
+  clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(renderProducts, 150);
+}
 
 async function loadSettings() {
   try {
@@ -829,12 +849,15 @@ function renderProducts() {
   const searchEl = document.getElementById("prod-search");
   const query = searchEl ? searchEl.value.trim().toLowerCase() : "";
 
+  // Compute each product's status once for this render (used by filter + sort).
+  const statusById = new Map(products.map(p => [p.id, getStatus(p)]));
+
   let visible = products
     .filter(p => {
       if (currentCat === "all") return true;
       return (p.category || "uncategorized") === currentCat;
     })
-    .filter(p => getStatus(p) !== "oos")
+    .filter(p => statusById.get(p.id) !== "oos")
     .filter(p => {
       if (!query) return true;
       return (p.name || "").toLowerCase().includes(query) ||
@@ -848,14 +871,10 @@ function renderProducts() {
 
   // Sort: available first, coming soon, pre-order
   const statusOrder = { available: 0, pre: 1, soon: 2 };
-  visible.sort((a, b) => (statusOrder[getStatus(a)] || 0) - (statusOrder[getStatus(b)] || 0));
+  visible.sort((a, b) => (statusOrder[statusById.get(a.id)] || 0) - (statusOrder[statusById.get(b.id)] || 0));
 
   list.innerHTML = visible.map(p => buildCard(p)).join("");
-
-  // Attach click handlers
-  list.querySelectorAll(".pcard:not(.pcard--oos)").forEach(card => {
-    card.addEventListener("click", () => toggleProduct(parseInt(card.dataset.id)));
-  });
+  // Click handling is delegated once in wireProductList() — no per-card listeners here.
 }
 
 // ── VIAL ART ──
@@ -952,7 +971,7 @@ function buildCard(p) {
           <button class="qty-btn" onclick="event.stopPropagation();adjustQty(${p.id},1)">+</button>
         </div>
       </div>
-      ${inCart ? `<div class="pcard-avail">${p.status==='pre_order' ? (onOrderMap[p.id]||0)+' incoming' : (p.stock+' avail.')}</div>` : ""}
+      <div class="pcard-avail" ${inCart ? "" : 'style="display:none;"'}>${p.status==='pre_order' ? (onOrderMap[p.id]||0)+' incoming' : (p.stock+' avail.')}</div>
     </div>
   </div>`;
 }
@@ -965,8 +984,22 @@ function toggleProduct(id) {
     if (!p) return;
     cart[id] = 1;
   }
-  renderProducts();
+  updateCard(id);   // touch only this card, not the whole grid
   renderOrder();
+}
+
+// Update a single product card in place (selection, qty stepper, avail line).
+function updateCard(id) {
+  const card = document.querySelector('.pcard[data-id="' + id + '"]');
+  if (!card) return;
+  const inCart = cart[id] !== undefined;
+  card.classList.toggle("pcard--sel", inCart);
+  const qtyWrap = card.querySelector(".pcard-qty");
+  if (qtyWrap) qtyWrap.style.display = inCart ? "" : "none";
+  const qtyNum = card.querySelector(".qty-num");
+  if (qtyNum) qtyNum.textContent = cart[id] || 1;
+  const avail = card.querySelector(".pcard-avail");
+  if (avail) avail.style.display = inCart ? "" : "none";
 }
 
 function adjustQty(id, delta) {
@@ -1276,5 +1309,645 @@ function isValidEmailFront(email) {
   return true;
 }
 </script>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     PEPTIDE CALCULATOR · drop-in module  ·  v2026-07-19c
+     Paste this ENTIRE block immediately before </body>.
+     Namespaced "pc-" to avoid collisions. No cart coupling.
+     Pulls the live product list from Supabase for the dropdown
+     (falls back to a built-in list if the fetch fails).
+     Blend/component breakdown applies ONLY to KLOW — every other
+     product, including other multi-peptide combos, is single-strength.
+
+     ▸ To re-theme, change ONLY the ":root" THEME block below.
+       Everything after it (CORE + SUPABASE CONFIG + JS) is identical
+       across BRL and SB — keep them in sync.
+     ─────────────────────────────────────────────────────────────────
+     THEME: Bold Research Labs (dark navy · gold · teal)
+     ═══════════════════════════════════════════════════════════════════ -->
+<style>
+:root{
+  --pc-bg:        #071a26;
+  --pc-bg2:       #0c2334;
+  --pc-surface:   rgba(255,255,255,0.035);
+  --pc-border:    rgba(201,149,42,0.18);
+  --pc-border-hi: rgba(201,149,42,0.55);
+  --pc-text:      #ECF2F5;
+  --pc-text2:     rgba(220,235,242,0.82);
+  --pc-muted:     rgba(200,220,230,0.45);
+  --pc-accent:    #C9952A;
+  --pc-accent2:   #1A9BAA;
+  --pc-grad:      linear-gradient(135deg,#E8B84B 0%,#1A9BAA 100%);
+  --pc-on-accent: #0a1720;
+  --pc-good:      #2EC4D6;
+  --pc-danger:    #ff5a5a;
+  --pc-font-disp: 'Oxanium', sans-serif;
+  --pc-font-ui:   'Oxanium', sans-serif;
+  --pc-font-mono: 'DM Mono', monospace;
+  --pc-radius:    12px;
+}
+
+/* ═══════════════ CORE (identical across brands) ═══════════════ */
+#pc-fab{
+  position:fixed; right:20px; bottom:20px; z-index:9000;
+  display:flex; align-items:center; gap:9px;
+  padding:13px 18px; border:none; cursor:pointer;
+  border-radius:999px; background:var(--pc-grad); color:var(--pc-on-accent);
+  font-family:var(--pc-font-disp); font-weight:700; font-size:13px;
+  letter-spacing:.02em; box-shadow:0 8px 26px rgba(0,0,0,.42);
+  transition:transform .18s, box-shadow .18s, bottom .28s ease;
+}
+#pc-fab:hover{ transform:translateY(-2px); box-shadow:0 12px 32px rgba(0,0,0,.5); }
+#pc-fab:active{ transform:translateY(0); }
+#pc-fab.pc-fab--raised{ bottom:92px; }   /* lifts clear of the site cart bar when it appears */
+#pc-fab svg{ width:18px; height:18px; }
+@media(max-width:560px){ #pc-fab span{ display:none; } #pc-fab{ padding:14px; } }
+
+#pc-backdrop{
+  position:fixed; inset:0; z-index:9001;
+  background:rgba(3,7,14,.74); backdrop-filter:blur(3px);
+  opacity:0; pointer-events:none; transition:opacity .22s;
+  display:flex; align-items:flex-end; justify-content:center;
+}
+#pc-backdrop.pc-show{ opacity:1; pointer-events:auto; }
+@media(min-width:620px){ #pc-backdrop{ align-items:center; padding:24px; } }
+
+#pc-modal{
+  width:100%; max-width:560px; max-height:92vh; overflow-y:auto;
+  background:var(--pc-bg); color:var(--pc-text);
+  border:1px solid var(--pc-border);
+  border-radius:var(--pc-radius) var(--pc-radius) 0 0;
+  transform:translateY(24px); transition:transform .26s cubic-bezier(.2,.8,.25,1);
+  font-family:var(--pc-font-mono);
+}
+#pc-backdrop.pc-show #pc-modal{ transform:translateY(0); }
+@media(min-width:620px){ #pc-modal{ border-radius:var(--pc-radius); } }
+#pc-modal::-webkit-scrollbar{ width:8px; }
+#pc-modal::-webkit-scrollbar-thumb{ background:var(--pc-border); border-radius:8px; }
+
+.pc-head{
+  position:sticky; top:0; z-index:3; background:var(--pc-bg);
+  padding:18px 20px 12px; border-bottom:1px solid var(--pc-border);
+  display:flex; align-items:flex-start; justify-content:space-between; gap:12px;
+}
+.pc-title{ font-family:var(--pc-font-disp); font-weight:800; font-size:19px; letter-spacing:.01em; }
+.pc-title em{ font-style:normal; background:var(--pc-grad); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
+.pc-sub{ font-size:11px; color:var(--pc-muted); margin-top:3px; letter-spacing:.03em; }
+.pc-close{
+  flex:none; width:32px; height:32px; border-radius:50%; cursor:pointer;
+  border:1.5px solid var(--pc-border); background:var(--pc-bg2); color:var(--pc-text2);
+  font-size:17px; line-height:1; display:flex; align-items:center; justify-content:center;
+}
+.pc-close:hover{ color:var(--pc-accent); border-color:var(--pc-border-hi); }
+
+.pc-tabs{
+  position:sticky; top:64px; z-index:2; background:var(--pc-bg);
+  display:flex; gap:4px; padding:12px 16px 0; border-bottom:1px solid var(--pc-border);
+}
+.pc-tab{
+  flex:1; padding:9px 6px 11px; cursor:pointer; text-align:center;
+  background:none; border:none; border-bottom:2px solid transparent;
+  color:var(--pc-muted); font-family:var(--pc-font-ui); font-weight:600;
+  font-size:12px; letter-spacing:.02em; transition:color .15s, border-color .15s;
+}
+.pc-tab:hover{ color:var(--pc-text2); }
+.pc-tab.pc-active{ color:var(--pc-text); border-bottom-color:var(--pc-accent); }
+
+.pc-body{ padding:18px 20px 26px; }
+.pc-pane{ display:none; }
+.pc-pane.pc-active{ display:block; animation:pc-fade .2s; }
+@keyframes pc-fade{ from{ opacity:0; transform:translateY(4px); } to{ opacity:1; transform:none; } }
+.pc-single, .pc-blend{ display:none; }
+.pc-mode-single .pc-single{ display:block; }
+.pc-mode-blend  .pc-blend{ display:block; }
+
+.pc-field{ margin-bottom:15px; }
+.pc-label{
+  display:block; font-family:var(--pc-font-ui); font-weight:600; font-size:10.5px;
+  text-transform:uppercase; letter-spacing:.1em; color:var(--pc-text2); margin-bottom:6px;
+}
+.pc-inrow{ display:flex; gap:8px; }
+.pc-input, .pc-select{
+  width:100%; padding:11px 12px; background:var(--pc-bg2);
+  border:1px solid var(--pc-border); border-radius:9px;
+  color:var(--pc-text); font-family:var(--pc-font-mono); font-size:14px;
+  transition:border-color .15s;
+}
+.pc-input:focus, .pc-select:focus{ outline:none; border-color:var(--pc-border-hi); }
+.pc-input::placeholder{ color:var(--pc-muted); }
+.pc-select{ cursor:pointer; }
+.pc-select option{ background:var(--pc-bg2); color:var(--pc-text); }
+.pc-select optgroup{ background:var(--pc-bg); color:var(--pc-muted); font-style:normal; }
+.pc-unit{ flex:none; width:88px; }
+.pc-static{ display:flex; align-items:center; justify-content:center; color:var(--pc-muted); }
+.pc-hint{ font-size:10.5px; color:var(--pc-muted); margin-top:5px; line-height:1.5; }
+
+/* blend composition summary */
+.pc-comp{
+  margin-bottom:15px; padding:12px 14px; border-radius:10px;
+  background:var(--pc-surface); border:1px solid var(--pc-border);
+}
+.pc-comp-t{ font-family:var(--pc-font-ui); font-weight:600; font-size:10px; text-transform:uppercase; letter-spacing:.1em; color:var(--pc-accent); margin-bottom:8px; }
+.pc-comp-row{ display:flex; justify-content:space-between; font-size:12.5px; padding:3px 0; }
+.pc-comp-row span:last-child{ color:var(--pc-text2); }
+
+/* quick-draw chips */
+.pc-chips{ display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; }
+.pc-chip{
+  padding:5px 11px; border-radius:999px; cursor:pointer; font-size:11px;
+  background:var(--pc-bg2); border:1px solid var(--pc-border); color:var(--pc-text2);
+  font-family:var(--pc-font-mono);
+}
+.pc-chip:hover{ border-color:var(--pc-border-hi); color:var(--pc-text); }
+
+.pc-result{
+  margin-top:6px; padding:16px; border-radius:var(--pc-radius);
+  background:var(--pc-surface); border:1px solid var(--pc-border);
+}
+.pc-result.pc-err{ border-color:rgba(255,90,90,.4); background:rgba(255,90,90,.07); }
+.pc-rrow{ display:flex; justify-content:space-between; align-items:baseline; padding:7px 0; }
+.pc-rrow + .pc-rrow{ border-top:1px solid var(--pc-border); }
+.pc-rlabel{ font-size:11.5px; color:var(--pc-text2); letter-spacing:.02em; }
+.pc-rval{ font-family:var(--pc-font-disp); font-weight:700; font-size:16px; color:var(--pc-text); }
+.pc-rval.pc-hero{ font-size:22px; background:var(--pc-grad); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
+.pc-rsub{ font-size:10px; color:var(--pc-muted); margin-left:5px; }
+.pc-errmsg{ color:var(--pc-danger); font-size:12.5px; line-height:1.5; }
+
+/* per-component breakdown block */
+.pc-bd-title{ font-family:var(--pc-font-ui); font-weight:600; font-size:10px; text-transform:uppercase; letter-spacing:.1em; color:var(--pc-text2); margin:10px 0 6px; }
+.pc-bd-row{ display:flex; justify-content:space-between; align-items:baseline; padding:8px 10px; margin-bottom:5px; border-radius:8px; background:var(--pc-bg2); border:1px solid var(--pc-border); }
+.pc-bd-name{ font-size:12.5px; color:var(--pc-text); }
+.pc-bd-amt{ font-family:var(--pc-font-disp); font-weight:700; font-size:15px; color:var(--pc-accent2); }
+.pc-bd-amt em{ font-style:normal; font-size:10px; color:var(--pc-muted); margin-left:4px; font-family:var(--pc-font-mono); }
+
+/* U-100 syringe visual */
+.pc-syr{ margin-top:14px; }
+.pc-syr-track{
+  position:relative; height:24px; border-radius:6px; overflow:hidden;
+  background:var(--pc-bg2); border:1px solid var(--pc-border);
+  background-image:repeating-linear-gradient(90deg, transparent, transparent 9%, var(--pc-border) 9%, var(--pc-border) calc(9% + 1px));
+}
+.pc-syr-fill{
+  position:absolute; left:0; top:0; bottom:0; width:0;
+  background:var(--pc-grad); opacity:.85; transition:width .3s cubic-bezier(.2,.8,.25,1);
+}
+.pc-syr-scale{ display:flex; justify-content:space-between; font-size:9px; color:var(--pc-muted); margin-top:4px; letter-spacing:.05em; }
+
+.pc-disc{
+  margin-top:18px; padding-top:14px; border-top:1px solid var(--pc-border);
+  font-size:10px; color:var(--pc-muted); line-height:1.6; letter-spacing:.02em;
+}
+</style>
+
+<!-- FAB -->
+<button id="pc-fab" onclick="PepCalc.open()" aria-label="Open peptide calculator">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 7h6M9 11h6M9 15h3"/></svg>
+  <span>Dose Calculator</span>
+</button>
+
+<!-- MODAL -->
+<div id="pc-backdrop" onclick="PepCalc.bgClose(event)">
+  <div id="pc-modal" role="dialog" aria-label="Peptide dose calculator">
+    <div class="pc-head">
+      <div>
+        <div class="pc-title">Peptide <em>Calculator</em></div>
+        <div class="pc-sub">Reconstitution · doses &amp; supply</div>
+      </div>
+      <button class="pc-close" onclick="PepCalc.close()" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="pc-tabs">
+      <button class="pc-tab pc-active" data-pc-tab="recon" onclick="PepCalc.tab('recon')">Reconstitute</button>
+      <button class="pc-tab" data-pc-tab="supply" onclick="PepCalc.tab('supply')">Supply</button>
+    </div>
+
+    <div class="pc-body">
+
+      <!-- shared preset (live catalog) -->
+      <div class="pc-field">
+        <label class="pc-label">Peptide</label>
+        <select class="pc-select" id="pc-preset" onchange="PepCalc.applyPreset()">
+          <option value="__custom">— Custom / enter manually —</option>
+        </select>
+        <div class="pc-hint" id="pc-preset-hint">Loading catalog…</div>
+      </div>
+
+      <!-- ── TAB 1: RECONSTITUTION ── -->
+      <div class="pc-pane pc-active" data-pc-pane="recon">
+
+        <!-- SINGLE peptide inputs -->
+        <div class="pc-single">
+          <div class="pc-field">
+            <label class="pc-label">Vial strength (total peptide)</label>
+            <div class="pc-inrow">
+              <input class="pc-input" id="pc-r-strength" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 20" oninput="PepCalc.calc()">
+              <select class="pc-select pc-unit" id="pc-r-strength-u" onchange="PepCalc.calc()">
+                <option value="mg">mg</option><option value="mcg">mcg</option>
+              </select>
+            </div>
+          </div>
+          <div class="pc-field">
+            <label class="pc-label">Bacteriostatic water added</label>
+            <div class="pc-inrow">
+              <input class="pc-input" id="pc-r-bac" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 2" oninput="PepCalc.calc()">
+              <div class="pc-select pc-unit pc-static">mL</div>
+            </div>
+          </div>
+          <div class="pc-field">
+            <label class="pc-label">Desired dose</label>
+            <div class="pc-inrow">
+              <input class="pc-input" id="pc-r-dose" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 2.5" oninput="PepCalc.calc()">
+              <select class="pc-select pc-unit" id="pc-r-dose-u" onchange="PepCalc.calc()">
+                <option value="mg">mg</option><option value="mcg" selected>mcg</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- BLEND inputs -->
+        <div class="pc-blend">
+          <div class="pc-comp" id="pc-r-comp"></div>
+          <div class="pc-field">
+            <label class="pc-label">Bacteriostatic water added</label>
+            <div class="pc-inrow">
+              <input class="pc-input" id="pc-rb-bac" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 2.5" oninput="PepCalc.calc()">
+              <div class="pc-select pc-unit pc-static">mL</div>
+            </div>
+          </div>
+          <div class="pc-field">
+            <label class="pc-label">Amount you draw</label>
+            <div class="pc-inrow">
+              <input class="pc-input" id="pc-rb-draw" type="number" inputmode="decimal" min="0" step="any" placeholder="10" value="10" oninput="PepCalc.calc()">
+              <div class="pc-select pc-unit pc-static">units</div>
+            </div>
+            <div class="pc-chips">
+              <span class="pc-chip" onclick="PepCalc.setDraw(5)">5 u</span>
+              <span class="pc-chip" onclick="PepCalc.setDraw(10)">10 u</span>
+              <span class="pc-chip" onclick="PepCalc.setDraw(20)">20 u</span>
+              <span class="pc-chip" onclick="PepCalc.setDraw(30)">30 u</span>
+              <span class="pc-chip" onclick="PepCalc.setDraw(50)">50 u</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="pc-result" id="pc-r-out"><div class="pc-hint">Choose a peptide or enter values to calculate.</div></div>
+      </div>
+
+      <!-- ── TAB 2: SUPPLY ── -->
+      <div class="pc-pane" data-pc-pane="supply">
+
+        <!-- SINGLE -->
+        <div class="pc-single">
+          <div class="pc-field">
+            <label class="pc-label">Vial strength (total peptide)</label>
+            <div class="pc-inrow">
+              <input class="pc-input" id="pc-s-strength" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 10" oninput="PepCalc.calc()">
+              <select class="pc-select pc-unit" id="pc-s-strength-u" onchange="PepCalc.calc()">
+                <option value="mg">mg</option><option value="mcg">mcg</option>
+              </select>
+            </div>
+          </div>
+          <div class="pc-field">
+            <label class="pc-label">Dose per administration</label>
+            <div class="pc-inrow">
+              <input class="pc-input" id="pc-s-dose" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 250" oninput="PepCalc.calc()">
+              <select class="pc-select pc-unit" id="pc-s-dose-u" onchange="PepCalc.calc()">
+                <option value="mg">mg</option><option value="mcg" selected>mcg</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- BLEND -->
+        <div class="pc-blend">
+          <div class="pc-comp" id="pc-s-comp"></div>
+          <div class="pc-field">
+            <label class="pc-label">Bacteriostatic water added</label>
+            <div class="pc-inrow">
+              <input class="pc-input" id="pc-sb-bac" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 2.5" oninput="PepCalc.calc()">
+              <div class="pc-select pc-unit pc-static">mL</div>
+            </div>
+          </div>
+          <div class="pc-field">
+            <label class="pc-label">Amount you draw per dose</label>
+            <div class="pc-inrow">
+              <input class="pc-input" id="pc-sb-draw" type="number" inputmode="decimal" min="0" step="any" placeholder="10" value="10" oninput="PepCalc.calc()">
+              <div class="pc-select pc-unit pc-static">units</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- frequency (shared) -->
+        <div class="pc-field">
+          <label class="pc-label">Frequency</label>
+          <select class="pc-select" id="pc-freq" onchange="PepCalc.calc()">
+            <option value="14">Twice daily (14×/week)</option>
+            <option value="7">Once daily (7×/week)</option>
+            <option value="5">5× / week</option>
+            <option value="3.5">Every other day (~3.5×/week)</option>
+            <option value="3">3× / week</option>
+            <option value="2">2× / week</option>
+            <option value="1">Once weekly</option>
+          </select>
+        </div>
+
+        <div class="pc-result" id="pc-s-out"><div class="pc-hint">Choose a peptide or enter values to calculate.</div></div>
+      </div>
+
+      <div class="pc-disc">Educational reconstitution math for research materials only — unit conversions (mg / mcg / mL / U-100 syringe units). Not medical, dosing, or prescribing advice. Verify all figures independently.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  /* ═══════════ SUPABASE CONFIG (identical across brands) ═══════════ */
+  var SUPA_URL = "https://bnkcqgzotynavfzhnotx.supabase.co";
+  var SUPA_KEY = "sb_publishable_C0NjdsOt_lWHYuj1xuurYw_HgPRz3rF";
+  var EXCLUDE_CATEGORIES = ["capsules"];   // never show these
+  /* ════════════════════════════════════════════════════════════════ */
+
+  // Blend treatment is intentionally limited to KLOW only — every other
+  // product (including other multi-peptide combos) is calculated as a
+  // single strength. To add another blend later, add a line here.
+  // Keyword (lowercase, matched as substring in the product name) -> component list [name, mg].
+  var KNOWN_BLENDS = {
+    "klow": [["GHK-Cu",50],["BPC-157",10],["TB-500",10],["KPV",10]]
+  };
+
+  var $ = function(id){ return document.getElementById(id); };
+  var toMcg = function(val, unit){ return unit === "mg" ? val * 1000 : val; };
+  var num = function(id){ var v = parseFloat($(id).value); return isNaN(v) ? NaN : v; };
+  var fmt = function(n, dp){
+    if(!isFinite(n)) return "—";
+    dp = (dp === undefined) ? 2 : dp;
+    var f = Math.pow(10,dp);
+    return (Math.round(n*f)/f).toLocaleString(undefined,{maximumFractionDigits:dp});
+  };
+  // pretty-print an amount given in mcg: show mg when >= 1000 mcg
+  var amtHtml = function(mcg){
+    if(mcg >= 1000) return fmt(mcg/1000, 2) + ' <em>mg</em>';
+    return fmt(mcg, mcg < 10 ? 1 : 0) + ' <em>mcg</em>';
+  };
+
+  // Parse a single strength "…20mg" / "…500mcg" -> {val, unit} or null
+  function parseStrength(str){
+    if(!str) return null;
+    var m = String(str).match(/([\d.]+)\s*(mcg|mg)\b/i);
+    if(!m) return null;
+    return { val: parseFloat(m[1]), unit: /mcg/i.test(m[2]) ? "mcg" : "mg" };
+  }
+
+  // Build a preset record from a catalog product.
+  // Only KLOW (per KNOWN_BLENDS) is treated as a blend; everything else is single-strength.
+  function buildPreset(p){
+    var low = (p.name || "").toLowerCase();
+    for(var k in KNOWN_BLENDS){
+      if(KNOWN_BLENDS.hasOwnProperty(k) && low.indexOf(k) !== -1){
+        return { name:p.name, isBlend:true, components: KNOWN_BLENDS[k].map(function(c){ return c.slice(); }) };
+      }
+    }
+    var s = parseStrength(p.name) || parseStrength(p.unit);
+    return { name:p.name, isBlend:false, strength: s ? s.val : null, unit: s ? s.unit : "mg" };
+  }
+
+  var PRESETS = [];   // filled from catalog
+  var CURRENT = null; // selected preset record
+
+  // ── Fallback list if catalog fetch fails ──
+  var FALLBACK = [
+    "Tirzepatide 20mg","Semaglutide 5mg","Retatrutide 10mg","Cagrilintide 5mg",
+    "BPC-157 10mg","TB-500 10mg","KLOW 80mg","Ipamorelin 5mg","CJC-1295 5mg",
+    "Sermorelin 5mg","Tesamorelin 10mg","MOTS-c 10mg","GHK-Cu 50mg","Epitalon 10mg",
+    "PT-141 10mg","NAD+ 500mg","SS-31 10mg","Semax 10mg","Selank 10mg","KPV 10mg"
+  ];
+
+  function fillDropdown(){
+    var sel = $("pc-preset");
+    sel.innerHTML = '<option value="__custom">— Custom / enter manually —</option>';
+    var blends = [], singles = [];
+    PRESETS.forEach(function(rec, i){ (rec.isBlend ? blends : singles).push(i); });
+    function opt(i){
+      var o = document.createElement("option");
+      o.value = i; o.textContent = PRESETS[i].name;
+      return o;
+    }
+    if(blends.length){
+      var gb = document.createElement("optgroup"); gb.label = "Blends";
+      blends.forEach(function(i){ gb.appendChild(opt(i)); });
+      sel.appendChild(gb);
+    }
+    if(singles.length){
+      var gs = document.createElement("optgroup"); gs.label = "Peptides";
+      singles.forEach(function(i){ gs.appendChild(opt(i)); });
+      sel.appendChild(gs);
+    }
+  }
+
+  var _catalogLoaded = false;
+  async function loadCatalog(){
+    try{
+      // Reuse the order form's already-fetched products if present; only hit
+      // the network as a fallback (avoids a second catalog fetch on the page).
+      var rows;
+      var formProducts = (typeof products !== "undefined" && Array.isArray(products) && products.length) ? products : null;
+      if(formProducts){
+        rows = formProducts;
+      } else {
+        var res = await fetch(SUPA_URL + "/rest/v1/products?select=name,unit,category,status&status=neq.coming_soon&order=name", {
+          headers: { "apikey": SUPA_KEY, "Authorization": "Bearer " + SUPA_KEY }
+        });
+        if(!res.ok) throw new Error("http " + res.status);
+        rows = await res.json();
+      }
+      var seen = {};
+      PRESETS = (rows || [])
+        .filter(function(p){
+          return p.name
+            && p.status !== "coming_soon"                                          // form keeps these; exclude here
+            && EXCLUDE_CATEGORIES.indexOf((p.category || "").toLowerCase()) === -1;
+        })
+        .map(buildPreset)
+        .filter(function(r){ if(seen[r.name]) return false; seen[r.name] = 1; return true; });
+      $("pc-preset-hint").textContent = PRESETS.length + " products loaded from catalog.";
+    }catch(e){
+      PRESETS = FALLBACK.map(function(n){ return buildPreset({name:n}); });
+      $("pc-preset-hint").textContent = "Catalog offline — showing common peptides. You can still enter values manually.";
+    }
+    fillDropdown();
+  }
+
+  function setMode(isBlend){
+    var m = $("pc-modal");
+    m.classList.toggle("pc-mode-blend", isBlend);
+    m.classList.toggle("pc-mode-single", !isBlend);
+  }
+
+  function compHtml(comps){
+    var total = comps.reduce(function(a,c){ return a + c[1]; }, 0);
+    var rows = comps.map(function(c){ return '<div class="pc-comp-row"><span>'+c[0]+'</span><span>'+fmt(c[1],2)+' mg</span></div>'; }).join("");
+    return '<div class="pc-comp-t">Blend contents · '+fmt(total,2)+' mg total</div>' + rows;
+  }
+
+  var PepCalc = {
+    open:  function(){ if(!_catalogLoaded){ _catalogLoaded = true; loadCatalog(); } $("pc-backdrop").classList.add("pc-show"); document.body.style.overflow="hidden"; },
+    close: function(){ $("pc-backdrop").classList.remove("pc-show"); document.body.style.overflow=""; },
+    bgClose: function(e){ if(e.target && e.target.id === "pc-backdrop") this.close(); },
+
+    tab: function(name){
+      var t = document.querySelectorAll(".pc-tab");
+      for(var i=0;i<t.length;i++){ t[i].classList.toggle("pc-active", t[i].getAttribute("data-pc-tab")===name); }
+      var p = document.querySelectorAll(".pc-pane");
+      for(var j=0;j<p.length;j++){ p[j].classList.toggle("pc-active", p[j].getAttribute("data-pc-pane")===name); }
+      this.calc();
+    },
+
+    setDraw: function(u){ $("pc-rb-draw").value = u; this.calc(); },
+
+    applyPreset: function(){
+      var v = $("pc-preset").value;
+      if(v === "__custom"){ CURRENT = null; setMode(false); this.calc(); return; }
+      CURRENT = PRESETS[parseInt(v,10)];
+      if(CURRENT.isBlend){
+        setMode(true);
+        $("pc-r-comp").innerHTML = compHtml(CURRENT.components);
+        $("pc-s-comp").innerHTML = compHtml(CURRENT.components);
+      } else {
+        setMode(false);
+        if(CURRENT.strength != null){
+          $("pc-r-strength").value = CURRENT.strength; $("pc-r-strength-u").value = CURRENT.unit;
+          $("pc-s-strength").value = CURRENT.strength; $("pc-s-strength-u").value = CURRENT.unit;
+        }
+      }
+      this.calc();
+    },
+
+    calc: function(){
+      var blend = !!(CURRENT && CURRENT.isBlend);
+      var reconActive = document.querySelector('.pc-pane[data-pc-pane="recon"]').classList.contains("pc-active");
+      if(reconActive){ blend ? this._reconBlend() : this._reconSingle(); }
+      else           { blend ? this._supplyBlend() : this._supplySingle(); }
+    },
+
+    // ── RECONSTITUTE · single ──
+    _reconSingle: function(){
+      var out = $("pc-r-out");
+      var strength = num("pc-r-strength"), bac = num("pc-r-bac"), dose = num("pc-r-dose");
+      if(isNaN(strength) || isNaN(bac) || isNaN(dose)){ return this._idle(out); }
+      if(strength<=0 || bac<=0 || dose<=0){ return this._err(out,"All values must be greater than zero."); }
+      var strMcg = toMcg(strength, $("pc-r-strength-u").value);
+      var doseMcg = toMcg(dose, $("pc-r-dose-u").value);
+      if(doseMcg > strMcg){ return this._err(out,"Dose exceeds the total peptide in the vial. Lower the dose or increase vial strength."); }
+      var concMcgMl = strMcg / bac;
+      var volMl = doseMcg / concMcgMl;
+      var units = volMl * 100;
+      out.className = "pc-result";
+      out.innerHTML =
+        rrow("Draw on syringe", '<span class="pc-rval pc-hero">'+fmt(units,1)+'</span><span class="pc-rsub">units (U-100)</span>') +
+        rrow("Volume per dose", '<span class="pc-rval">'+fmt(volMl,3)+'</span><span class="pc-rsub">mL</span>') +
+        rrow("Concentration", '<span class="pc-rval">'+fmt(concMcgMl/1000,2)+'</span><span class="pc-rsub">mg/mL · '+fmt(concMcgMl,0)+' mcg/mL</span>') +
+        syringe(units) +
+        (units>100 ? warn('Draw exceeds one full U-100 syringe ('+fmt(units,1)+' u). Consider more BAC water or a smaller dose.') :
+         units<5  ? note('Very small draw ('+fmt(units,1)+' u) — harder to measure. Less BAC water gives an easier-to-read amount.') : "");
+    },
+
+    // ── RECONSTITUTE · blend ──
+    _reconBlend: function(){
+      var out = $("pc-r-out");
+      var bac = num("pc-rb-bac"), draw = num("pc-rb-draw");
+      if(isNaN(bac) || isNaN(draw)){ return this._idle(out); }
+      if(bac<=0 || draw<=0){ return this._err(out,"BAC water and draw amount must be greater than zero."); }
+      var volMl = draw / 100;                                    // mL drawn
+      var rows = CURRENT.components.map(function(c){
+        var mcgInDraw = (c[1] * 1000) / bac * volMl;             // mg→mcg, /mL, × mL drawn
+        return '<div class="pc-bd-row"><span class="pc-bd-name">'+c[0]+'</span><span class="pc-bd-amt">'+amtHtml(mcgInDraw)+'</span></div>';
+      }).join("");
+      out.className = "pc-result";
+      out.innerHTML =
+        rrow("You are drawing", '<span class="pc-rval pc-hero">'+fmt(draw,1)+'</span><span class="pc-rsub">units · '+fmt(volMl,2)+' mL</span>') +
+        '<div class="pc-bd-title">Each draw delivers</div>' + rows +
+        syringe(draw) +
+        (draw>100 ? warn('Draw exceeds one full U-100 syringe.') : "");
+    },
+
+    // ── SUPPLY · single ──
+    _supplySingle: function(){
+      var out = $("pc-s-out");
+      var strength = num("pc-s-strength"), dose = num("pc-s-dose"), freq = parseFloat($("pc-freq").value);
+      if(isNaN(strength) || isNaN(dose)){ return this._idle(out); }
+      if(strength<=0 || dose<=0){ return this._err(out,"All values must be greater than zero."); }
+      var strMcg = toMcg(strength, $("pc-s-strength-u").value);
+      var doseMcg = toMcg(dose, $("pc-s-dose-u").value);
+      if(doseMcg > strMcg){ return this._err(out,"Dose exceeds the total peptide in the vial."); }
+      var dosesPerVial = strMcg / doseMcg;
+      var weeks = dosesPerVial / freq;
+      out.className = "pc-result";
+      out.innerHTML =
+        rrow("Doses per vial", '<span class="pc-rval pc-hero">'+fmt(dosesPerVial,1)+'</span><span class="pc-rsub">doses</span>') +
+        rrow("At this frequency", '<span class="pc-rval">'+fmt(freq,1)+'</span><span class="pc-rsub">doses / week</span>') +
+        rrow("Vial lasts", '<span class="pc-rval">'+fmt(weeks,1)+'</span><span class="pc-rsub">weeks · '+fmt(weeks*7,0)+' days</span>');
+    },
+
+    // ── SUPPLY · blend ──
+    _supplyBlend: function(){
+      var out = $("pc-s-out");
+      var bac = num("pc-sb-bac"), draw = num("pc-sb-draw"), freq = parseFloat($("pc-freq").value);
+      if(isNaN(bac) || isNaN(draw)){ return this._idle(out); }
+      if(bac<=0 || draw<=0){ return this._err(out,"BAC water and draw amount must be greater than zero."); }
+      var totalUnits = bac * 100;
+      var dosesPerVial = totalUnits / draw;
+      var weeks = dosesPerVial / freq;
+      var volMl = draw / 100;
+      var mini = CURRENT.components.map(function(c){
+        var mcg = (c[1] * 1000) / bac * volMl;
+        return '<div class="pc-bd-row"><span class="pc-bd-name">'+c[0]+'</span><span class="pc-bd-amt">'+amtHtml(mcg)+'</span></div>';
+      }).join("");
+      out.className = "pc-result";
+      out.innerHTML =
+        rrow("Doses per vial", '<span class="pc-rval pc-hero">'+fmt(dosesPerVial,1)+'</span><span class="pc-rsub">draws of '+fmt(draw,0)+' u</span>') +
+        rrow("At this frequency", '<span class="pc-rval">'+fmt(freq,1)+'</span><span class="pc-rsub">doses / week</span>') +
+        rrow("Vial lasts", '<span class="pc-rval">'+fmt(weeks,1)+'</span><span class="pc-rsub">weeks · '+fmt(weeks*7,0)+' days</span>') +
+        '<div class="pc-bd-title">Each '+fmt(draw,0)+'-unit draw delivers</div>' + mini;
+    },
+
+    _idle: function(el){ el.className="pc-result"; el.innerHTML='<div class="pc-hint">Choose a peptide or enter values to calculate.</div>'; },
+    _err:  function(el,msg){ el.className="pc-result pc-err"; el.innerHTML='<div class="pc-errmsg">'+msg+'</div>'; }
+  };
+
+  function rrow(label, valHtml){ return '<div class="pc-rrow"><span class="pc-rlabel">'+label+'</span><span>'+valHtml+'</span></div>'; }
+  function syringe(units){
+    var pct = Math.min(100, Math.max(0, units));
+    return '<div class="pc-syr"><div class="pc-syr-track"><div class="pc-syr-fill" style="width:'+pct+'%"></div></div>'+
+           '<div class="pc-syr-scale"><span>0</span><span>25</span><span>50</span><span>75</span><span>100 u</span></div></div>';
+  }
+  function warn(msg){ return '<div class="pc-hint" style="color:var(--pc-danger);margin-top:8px;">'+msg+'</div>'; }
+  function note(msg){ return '<div class="pc-hint" style="margin-top:8px;">'+msg+'</div>'; }
+
+  // Keep the floating button clear of the site's bottom cart bar when it shows.
+  function watchCartBar(){
+    var bar = document.querySelector(".cart-bar, #cart-bar");
+    if(!bar) return;
+    var fab = $("pc-fab");
+    var sync = function(){
+      var r = bar.getBoundingClientRect();
+      var onScreen = r.height > 0 && r.top < (window.innerHeight - 4);
+      fab.classList.toggle("pc-fab--raised", onScreen);
+    };
+    sync();
+    new MutationObserver(sync).observe(bar, { attributes:true, attributeFilter:["class","style"] });
+    window.addEventListener("resize", sync);
+  }
+
+  document.addEventListener("keydown", function(e){ if(e.key === "Escape") PepCalc.close(); });
+
+  setMode(false);
+  watchCartBar();
+  window.PepCalc = PepCalc;   // catalog loads lazily on first open()
+})();
+</script>
+<!-- ═══════════════ END PEPTIDE CALCULATOR ═══════════════ -->
+
 </body>
 </html>
